@@ -1,95 +1,88 @@
-# Grain Size Analysis of 316L Stainless Steel Microstructure
+# Grain Size Estimation for 316L Stainless Steel Microstructure (Segmentation & Metrology)
 
-This repository contains an image-processing and deep-learning pipeline to estimate grain size distributions of additively manufactured 316L stainless steel from microstructure images. The workflow combines classical computer vision (thresholding, gradient filters, HED) and a U-Net CNN to segment grain boundaries and extract quantitative microstructural features.
+This repository provides an image-processing and deep-learning pipeline to estimate grain-size information from micrographs by combining classical approaches (thresholding, gradient/Canny, HED) with a supervised U-Net segmentation model, followed by metrology (morphometric features + conversion to physical units).
 
-## Dataset
+## Data (public sources)
 
-The project uses a public grain-boundary dataset of 316L stainless steel produced by binder jetting additive manufacturing and imaged at 500× magnification. The original 1600×1200 images are split into tiles, and are paired with manually segmented masks (real grains) and synthetically generated microstructures (artificial grains, Voronoi-based). A calibration factor of 2.25 pixels per micron is used to convert measurements from pixels to physical units.
+The datasets used in this project are publicly available on Kaggle:
 
-Main dataset folders:
+- Real micrographs (316L ExONE, 500×): https://www.kaggle.com/datasets/peterwarren/exone-stainless-steel-316l-grains-500x
+- Artificial grains (Voronoi): https://www.kaggle.com/datasets/peterwarren/voronoi-artificial-grains-gen
 
-- `Grains/`: reference micrographs of the real microstructure.
-- `GRAIN DATA SET/AG`, `AGMask`: artificial grains and their ground-truth masks.
-- `GRAIN DATA SET/RG`, `RGMask`: real grains and their ground-truth masks.
-- `weights HED/`: Caffe model and deploy file used to run HED (Holistically-Nested Edge Detection).
+The real dataset corresponds to 316L stainless steel produced by Binder Jetting additive manufacturing (ExONE) and imaged with an optical microscope at 500× magnification. Initially, 21 micrographs of size 1600×1200 pixels are split into 400×300 tiles. The artificial dataset is based on Voronoi-generated microstructures with exact masks.
 
-Please respect the original dataset license and cite the authors if you use this project.
+## Folder layout (BASE_DIR)
 
-## Pipeline Overview
+Under the project root `BASE_DIR` (mounted from Google Drive in the notebook), the main folders are:
 
-The main logic is implemented in:
+- `Grains/`: reference micrographs (400×300 tiles).
+- `HED_raw/` and `HED_filtered/`: raw and filtered HED edge maps.
+- `FilteredGradV2/`: gradient-based outputs (version 2).
+- `Segmented/`: segmentation results (thresholding, gradient, HED, U-Net).
+- `weights HED/`: `deploy.prototxt` and `hed_pretrained_bsds.caffemodel`.
+- `GRAIN DATA SET/`: supervised dataset for U-Net, organized as:
+  - `AG/` and `AGMask/`: artificial grains (Voronoi) and masks.
+  - `RG/` and `RGMask/`: real grains and ground-truth masks.
+  - `THRESH_PRE/`, `HED_PRE/`, `GRAD_PRE/`: preprocessed variants (priors/inputs).
 
-- `notebooks/Finale notebook.ipynb`
+## Spatial calibration (pixel → microns)
 
-The pipeline includes:
+The conversion to physical units is based on a scale bar: **225 pixels for 100 microns**, hence:
 
-1. **Project setup and data access**
-   - Definition of base paths and dataset structure.
-   - Sanity checks on image shapes, counts, and file names.
+- `scale = 225/100 = 2.25` (pixels per micron)
+- `P2M = 1/scale` (microns per pixel)
 
-2. **Pre-processing and calibration**
-   - Loading representative micrographs.
-   - Spatial calibration with 2.25 pixels per micron.
-   - Preparation of tensors for training and evaluation.
+This calibration is used to convert areas (pixels → µm²) and lengths (pixels → microns) in the metrology outputs.
 
-3. **HED-based edge detection**
-   - Loading the HED model from `weights HED/`.
-   - Generating raw and filtered edge maps for each input image.
-   - Saving outputs in `HED_raw/` and `HED_filtered/`.
+## Pipeline overview
 
-4. **Supervised U-Net training**
-   - Building a U-Net encoder–decoder architecture in Keras/TensorFlow.
-   - Preparing training and validation sets from AG/RG images and masks.
-   - Training with checkpoints, early stopping, and LR scheduling.
-   - Monitoring loss and accuracy to assess convergence.
+The workflow is structured as follows:
 
-5. **Segmentation quality metrics**
-   - Computing pixel-wise metrics: accuracy, precision, recall, F1-score, Dice, IoU.
-   - Generating histograms and distributions of Dice/IoU per image.
-   - Comparing performance between classical methods and U-Net.
+1. **Initialization & project structure**
+   - Environment setup, definition of `DRIVE_ROOT` and `BASE_DIR`, and organization of input/output/model folders.
 
-6. **Label maps and feature extraction**
-   - Converting binary masks to label maps using connected-component analysis.
-   - Extracting per-grain features (area, perimeter, equivalent diameter, centroid,
-     major/minor axes, axis ratio, circularity).
-   - Storing results in structured CSV files and DataFrames.
+2. **Data preparation & calibration**
+   - Image preparation for downstream steps and definition of `P2M` for conversion to physical units.
 
-7. **Physical units and grain-size distributions**
-   - Converting pixel-based variables to microns and square microns using the
-     calibration factor.
-   - Building histograms, cumulative distributions, and summary statistics.
-   - Producing planimetric-style summaries and CSV exports.
+3. **Classical segmentation (threshold & gradient)**
+   - Manual thresholding + median blur via `manual_threshold_and_blur`.
+   - Canny-based edge detection + binarization via `segment_gradient`.
+   - Outputs: binary masks/edges usable for labeling and measurement.
 
-8. **Visualization and interactive interface**
-   - Drawing overlays with colored grains and numeric IDs on the original images.
-   - Providing an optional Gradio interface to:
-     - Upload a micrograph,
-     - Run segmentation,
-     - Visualize labeled grains,
-     - Download the corresponding table of grain features.
+4. **Planimetric estimation (Line Intercept)**
+   - Regular grid with `N_LINES_GRID = 20` and intercept counting via discrete differences (`np.diff`).
+   - Outputs: `Total_Grains_X`, `Total_Grains_Y` and averages `AVG_GrainX`, `AVG_GrainY`.
 
-## Repository Structure
+5. **HED segmentation and priors**
+   - HED edge detection from `deploy.prototxt` and `hed_pretrained_bsds.caffemodel` (with `CropLayer`).
+   - Production of binary masks and an `hed_prior` usable by U-Net.
 
-Suggested structure:
+6. **Supervised U-Net (image + priors)**
+   - Training on supervised data (256×256, 1 channel: `IMG_HEIGHT=256`, `IMG_WIDTH=256`, `IMG_CH_IMG=1`).
+   - Model configuration includes `U_Net_GrainSeg_GradHED` and priors (e.g., `grad_prior`, `hed_prior`).
+   - Loss/metrics: `bce_dice_loss`, `dice_coef`, `MeanIoUThreshold` (as `iou_score`), plus binary metrics (`bin_acc`, `precision`, `recall`).
 
-- `notebooks/`
-  - `Finale notebook.ipynb` – main notebook containing the full pipeline.
+7. **Labeling, morphometry & reporting**
+   - Labeling via `label_components` (based on `cv2.connectedComponentsWithStats`) and area filtering via `filter_components_by_area`.
+   - Morphometric extraction via `compute_grain_features_from_labels` (using `regionprops_table`), with fallback via `fallback_features_from_cc`.
+   - Contour-based measurements via `measure_grains_planimetric` (area, perimeter, circularity, aspect ratio, Feret-type distances) and unit conversion via `add_physical_units`.
+   - Reporting/inspection with visualization (e.g., `draw_grain_ids_on_image`) and a Gradio interface `segment_and_measure` offering `"U-Net"`, `"HED"`, `"Gradient"`, `"Threshold"` to output an overlay and a measurement table.
 
-- `data/`
-  - `Grains/` – reference microstructure images.
-  - `GRAIN DATA SET/` – artificial and real grain datasets with masks.
-  - `weights HED/` – HED model weights and configuration.
+## Key variables (summary)
 
-- `models/`
-  - `grains_unet_best.h5` – best U-Net weights (HDF5 format).
-  - `grains_unet.keras` – U-Net saved in the native Keras format.
+Central variables used for identification, morphometry, calibration, and indicators:
 
-- `outputs/`
-  - `HED_raw/`, `HED_filtered/`, `FilteredGradV2/`, `Segmented/` – processed images and masks.
-  - CSV summaries:
-    - `AR_HED_planimetric.csv`, `AREA_HED_planimetric.csv`, `CR_HED_planimetric.csv`,
-      `PERIM_HED_planimetric.csv`, `MAX_HED_planimetric.csv`, `MIN_HED_planimetric.csv`
-    - `Total_Grains_X_*.csv`, `Total_Grains_Y_*.csv`
-    - `AVG_GrainX_*.csv`, `AVG_GrainY_*.csv`
-    - `areas_grad_um2.csv`
-    - `grain_features_with_units.csv`
+- Identifiers: `image_id`, `grain_id`
+- Pixel-based measurements: `area_px`, `perimeter_px`, `equiv_diameter_px`, `centroid_row`, `centroid_col`, `major_axis_px`, `minor_axis_px`, `axis_ratio`, `circularity`
+- Calibration & physical units: `P2M`, `area_um2`, `equiv_diameter_um`, `major_axis_um`, `minor_axis_um`
+- Quality/quantification indicators: `dice_score`, `iou_score`, `Total_Grains_X`, `Total_Grains_Y`, `AVG_GrainX`, `AVG_GrainY`
+
+## Running the project
+
+The main logic is implemented in the project notebook (executed in Google Colab with Google Drive mounted). A typical run is:
+
+1. Mount Google Drive.
+2. Set `BASE_DIR` and ensure the expected folders exist.
+3. Run segmentation (classical, HED, U-Net), then labeling and measurement extraction.
+4. Generate reporting outputs (overlays/visualizations and measurement tables).
+
